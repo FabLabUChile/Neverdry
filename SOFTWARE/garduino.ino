@@ -15,60 +15,79 @@
 
 /************ GPIOs ************/
 char pin_sensor=0;
-char led_rojo=12;
-char led_verde=11;
-//para debug:
-char led_awake=13;
+char ledpins[]={9,10,11};
+char pin_boton=2;
+unsigned char color[]={255,255,255}; //NO TOCAR DIRECTAMENTE
+char awake_cont=0;
+char state=0; //0: ok. 1: seco. 2: muy mojado.
 
 /************ CONSTANTES (definidas como macros) ************/
-#define DELAY 500 //en ms
+#define TOLERANCIA 200 //hay que calibrarla. NO tiene sentido que sea mayor a 512
+#define AWAKE_FREQ 5
 
 /************ VARIABLES ************/
 
 int sensor_read;
 long t0, t1;
-int HUMEDAD_MIN = 600; //Calibrable
+int HUMEDAD_IDEAL = 100; //Calibrable por el usuario
+unsigned char indice_color=0; //de 0 a 6
+unsigned char colores[7][3]={{255,0,0},{0,255,0},{0,0,255},{255,255,0},{255,0,255},{0,255,255},{255,255,255}};
 
 /************ MÉTODOS ************/
+/* alertaRiego puede recibir tres valores:
+      ·0 indica todo ok.
+      ·1 indica falta agua.
+      ·2 indica exceso de agua */
 void alertaRiego(char b){
-  digitalWrite(led_rojo, b);
+  //switch - case sería más elegante
+  state=b;
+  if (b==1) {
+    Serial.println("poca agua!!!");
+    setColor(255,0,0);
+  }
+  if (b==2) {
+    Serial.println("mucha agua!!");
+    setColor(255,0,255);
+  }
+  if (b==0) setColor(0,0,0);
 }
 
 void rutinaLectura(){
   //Serial.print("lectura sensor: ");
   sensor_read=analogRead(pin_sensor);
   Serial.println(sensor_read);
-  if (sensor_read>HUMEDAD_MIN)
+  if (sensor_read<HUMEDAD_IDEAL-TOLERANCIA/2.0)
+    alertaRiego(2);
+  else if (sensor_read>HUMEDAD_IDEAL+TOLERANCIA/2.0)
     alertaRiego(1);
-  else
-    alertaRiego(0);
+  else alertaRiego(0);
 }
 
 /* pone al arduino a dormir */
 void dormir(){
-  //debug:
-  //Serial.println("durmiendo...");
-  digitalWrite(led_awake,LOW);
-  //delay(50);
-  
+  attachInterrupt(0, buttonHandler, LOW);
   /* setear tipo de sleep */
   set_sleep_mode(SLEEP_MODE_PWR_SAVE); //el de más ahorro de energía
   /* habilitar sleep */
   sleep_enable();
   /* ponerse a dormir */
+  
+  //debug
+  delay(50);
+  
   sleep_mode();
   /* Desde acá despierta. Deshabilitar sleep */
   sleep_disable();
-  
-  // debug:
-  //Serial.println("despierto!");
-  digitalWrite(led_awake,HIGH);
-}
-/* handler del WatchDog Timer */
-ISR(WDT_vect)
-{
+  /* Parpadear led que muestra corecto funcionamiento */
+  awake_cont=(awake_cont + 1)%AWAKE_FREQ;
+  if ((awake_cont==0)&&(state==0)){
+    setColor(0,255,0);
+    delay(50);
+    setColor(0,0,0);
+  }
 }
 
+/* Inicializa el WDT */
 void initWDT(){
   /* limpiar el flag de reset */
   MCUSR &= ~(1<<WDRF);
@@ -79,31 +98,88 @@ void initWDT(){
   /* Habilitar interrupt del watchdog. SIN RESET */
   WDTCSR |= (1 << WDIE);      
 }
+/*********** INTERRUPCIONES ***********/
+/* handler de la interrupcion generada por el WatchDog Timer */
+ISR(WDT_vect)
+{
+}
+/* handler de la interrupción que envía el botón */
+void buttonHandler(){
+  detachInterrupt(0);
+  
+  //debug:
+  Serial.println("boton");
+  delay(50);
+  
+  //hay que hacer tiempo hasta que el sensor se estabilice un poco.
+  char i;
+  for (i=0;i<5;i++){
+    fadeOnce();
+  }
+  awake_cont=0;
+  // leer el sensor y fijar valor óptimo de humedad seteado por el usuario. 
+  HUMEDAD_IDEAL=analogRead(pin_sensor)+TOLERANCIA/2.0-15; //totalmente experimental y puede ser modificado según se crea necesario.
+}
 
+/*******************/
+/* Manejo de los leds. Posiblemente implementar con clases en C++ para transparencia del código. */
+
+void setColor(unsigned char r, unsigned char g, unsigned char b){
+  color[0]=map(r,0,255,255,0);
+  color[1]=map(g,0,255,255,0);
+  color[2]=map(b,0,255,255,0);
+  analogWrite(ledpins[0],color[0]);
+  analogWrite(ledpins[1],color[1]);
+  analogWrite(ledpins[2],color[2]);
+}
+/* Efecto de FadeIn - FadeOut del led, con el color escogido.
+Esta función gana tiempo para que el sensor se estabilice un poco.*/
+void fadeOnce(unsigned char r, unsigned char g, unsigned char b){
+  //velocidad de fade fijada internamente por la función.
+  unsigned char f_color[]={r,g,b};
+  rutinaFade(f_color);
+}
+void fadeOnce(){//versión sin argumentos
+  rutinaFade(colores[indice_color]);
+  indice_color=(indice_color+1)%7;
+}
+void rutinaFade(unsigned char f_color[]){ //NO usar externamente
+  unsigned char i;
+  unsigned char resolucion=100;
+  int demora=4000; //microsegundos
+  for (i=0;i<resolucion;i++){
+    setColor((unsigned char)(f_color[0]*(i*1.0/resolucion)),(unsigned char)(f_color[1]*(i*1.0/resolucion)),(unsigned char)(f_color[2]*(i*1.0/resolucion)));
+    delayMicroseconds(demora);
+  }
+  for (i=resolucion;i>0;i--){
+    setColor((unsigned char)(f_color[0]*(i*1.0/resolucion)),(unsigned char)(f_color[1]*(i*1.0/resolucion)),(unsigned char)(f_color[2]*(i*1.0/resolucion)));
+    delayMicroseconds(demora);
+  }
+}
 /************ MAIN ************/
 
 void setup() {
   Serial.begin(9600);
+  Serial.print("Inicializando...      ");
   /* inicializar pines*/
   pinMode(pin_sensor, INPUT);
-  pinMode(led_rojo, OUTPUT);
-  pinMode(led_verde, OUTPUT); 
-  Serial.print("Inicializando...     ");
+  char i;
+  for (i=0;i<=2;i++){
+    pinMode(ledpins[i],OUTPUT);
+  }
+  pinMode(pin_boton, INPUT);
   /*** Inicializar WatchDog Timer ***/
-  //initWDT();
-  
-  // para debug:
-  pinMode(led_awake, OUTPUT);
-  digitalWrite(led_awake,HIGH);
+  initWDT();
   
   //setear valor predeterminado de humedad 
   Serial.println("Listo\n");
 }
 
 void loop() {
-  delay(100);
+  //delay(100);
   rutinaLectura();
-  //dormir();
+  dormir();
+  //fadeOnce();
 }
 
 /*
@@ -192,5 +268,25 @@ Versión 1.2
 
 Añadiduras:
     -Led RGB indicador
-    -Botón de calibración
+        Debe poder notificar: Sobrerriego de la planta, falta agua en la planta, en proceso de calibración, funcionamiento correcto.
+              Falta agua: Led rojo. Sin animación, pues está durmiendo.
+              Sobrerriego: Led amarillo.
+              En proceso de calibración: led azul animado.
+              Funcionamiento correcto: parpadeo de led verde cada vez que se despierta a hacer mediciones.
+              
+    -Botón de calibración: Ojo que lo más probable es que se presione cuando el arduino está dormido. Hay que poder escuchar esta interrupción y despertar.
+    
+    
+   por corregir: 
+       -cambiar if's por switch-case.
+       -implementar boton y led con clase de C++ para no ensuciar código con métodos propios de estos artefactos.
+       - el efecto de Fade de los leds ocurre el doble de veces de las que debería
+       -Al estar muy húmedo, se alterna el color entre rojo y amarillo, y no se queda fijo en amarillo como se desea.
+       -calibración del usuario debe tomar en cuenta que la humedad que establezca el usuario al regar, es CASI la cota
+       que define el umbral entre que está bien regada y que está excesivamente regada. Definir humedad ideal tomando esto
+       en cuenta.
+       
+Versión 1.3
+
+Corregidos algunos errores anteriores
 */
